@@ -1,7 +1,9 @@
 # ================== DeepSeek API配置 ==================
 
 # 从 https://platform.deepseek.com/ 获取API密钥
-DEEPSEEK_API_KEY = "sk-57ac88d776cb4150975fcb9bad5f021e"
+DEEPSEEK_API_KEY = "sk-your-api-key-here"
+
+
 
 # DeepSeek API地址
 DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
