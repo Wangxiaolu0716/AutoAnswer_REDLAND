@@ -2,9 +2,9 @@
 主程序 - 基于RapidOCR的屏幕截图答题辅助工具
 改进：完善依赖检查、修复线程安全、更健壮的错误处理
 """
-
 import sys
 import os
+os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = r"D:\迅雷下载\AutoAnswer_ai-main0\venv\Lib\site-packages\PyQt5\Qt5\plugins"
 import json
 import time
 import logging
@@ -27,7 +27,7 @@ def check_dependencies():
     """检查所有必要的依赖"""
     missing = []
 
-    # 核心依赖（RapidOCR替代PaddleOCR）
+    # 核心依赖
     core_deps = {
         'PyQt5': 'PyQt5',
         'mss': 'mss',
@@ -38,11 +38,14 @@ def check_dependencies():
 
     for module, package in core_deps.items():
         try:
-            __import__(module)
+            # 使用 importlib 导入，并指定全局命名空间
+            import importlib
+            importlib.import_module(module)
             logger.debug(f"✓ {package}")
-        except ImportError:
+        except Exception as e:
             missing.append(package)
             logger.warning(f"✗ {package} 未安装")
+            logger.error(f"  详细错误: {e}")
 
     if missing:
         print("\n" + "=" * 50)
@@ -252,7 +255,7 @@ class CaptureThread(QThread):
 
             if answer.get('source') == 'DeepSeek':
                 self.api_count += 1
-            elif answer.get('source') == '本地库':
+            elif answer.get('source') in ('本地库', '题库'):
                 self.hit_count += 1
 
             answer_letter = answer.get('answer', '?')
@@ -400,7 +403,7 @@ def main():
     print("=" * 50 + "\n")
 
     # 检查依赖
-    check_dependencies()
+   # check_dependencies() #
 
     # 检查API密钥
     if not DEEPSEEK_API_KEY or DEEPSEEK_API_KEY == "sk-your-key-here":

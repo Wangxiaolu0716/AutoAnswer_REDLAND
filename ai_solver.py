@@ -4,9 +4,10 @@ AI解题模块 - 使用DeepSeek API进行答案推理
 """
 
 import re
+import difflib
 import time
 import logging
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import openai
 
@@ -38,6 +39,26 @@ class DeepSeekSolver:
         except ImportError:
             logger.warning("无法导入本地知识库，将跳过本地查询")
             self.local_knowledge = {}
+
+        # 加载本地题库（CSV / Excel，可选，文件缺失时自动跳过）
+        self.kb = None
+        try:
+            from config import (
+                KB_PATH, KB_QUESTION_COL, KB_ANSWER_COL,
+                KB_DETAIL_COL, KB_MIN_RATIO
+            )
+            from knowledge_base import KnowledgeBase
+            kb = KnowledgeBase(
+                path=KB_PATH,
+                question_col=KB_QUESTION_COL,
+                answer_col=KB_ANSWER_COL,
+                detail_col=KB_DETAIL_COL,
+                min_ratio=KB_MIN_RATIO,
+            )
+            if kb.load():
+                self.kb = kb
+        except Exception as e:  # pylint: disable=broad-except
+            logger.warning(f"本地题库加载失败，将跳过: {e}")
 
         logger.info(f"DeepSeek解题器初始化完成，使用模型: {model}，联网搜索: {enable_search}")
 
@@ -74,7 +95,13 @@ class DeepSeekSolver:
 
         logger.debug(f"开始解题: {question[:50]}...")
 
-        # 第1步：查本地知识库
+        # 第1步：查本地题库（CSV / Excel）
+        kb_result = self._check_kb(question)
+        if kb_result:
+            logger.debug("命中本地题库")
+            return self._format_kb_result(kb_result, options, question_type)
+
+        # 第2步：查内置本地知识库
         t0 = time.time()
         local_result = self._check_local(question)
         t1 = time.time()
@@ -86,7 +113,7 @@ class DeepSeekSolver:
                 "source": "本地库"
             }
 
-        # 第2步：调用DeepSeek API（带重试）
+        # 第3步：调用DeepSeek API（带重试）
         api_result = self._call_api_with_retry(
             question, options, question_type, raw_text
         )
@@ -94,21 +121,112 @@ class DeepSeekSolver:
         logger.info(f"⏱ AI本地库:{t1-t0:.3f}s API+重试:{t2-t1:.2f}s")
         return api_result
 
+    def _check_kb(self, question_text: str) -> Optional[Dict]:
+        """在本地题库（CSV / Excel）中查找匹配"""
+        if self.kb is None:
+            return None
+        return self.kb.search(question_text)
+
+    def _format_kb_result(self, kb_result: Dict, options: Dict, question_type: str) -> Dict:
+        """把题库原始答案（如 'C.800'）解析成对当前题目最合适的答案。
+
+        题库里存的是「字母 + 内容」，但不同试卷选项顺序不同，字母并不可靠。
+        所以优先拆出内容，再把它映射回当前题目的正确选项字母；没有选项时直接返回内容。
+        """
+        raw = kb_result.get('answer', '?')
+        detail = kb_result.get('detail', '')
+        _letter, content = self._split_answer(raw)
+
+        # 选择题 + 有 OCR 选项 + 有内容：把内容映射回当前题目的正确选项字母
+        if question_type == 'choice' and options and content:
+            matched = self._match_option(content, options)
+            if matched:
+                return {"answer": matched, "detail": content, "source": "题库"}
+
+        # 其余情况直接返回内容（没有内容则退回原始答案）
+        return {"answer": content or raw, "detail": detail, "source": "题库"}
+
+    @staticmethod
+    def _split_answer(raw: str) -> Tuple[Optional[str], str]:
+        """拆出选项字母与内容：'C.800' -> ('C', '800')；'800' -> (None, '800')。"""
+        if not raw:
+            return None, ""
+        raw = raw.strip()
+        m = re.match(r'^([A-Za-z]{1,3})\s*[\.。、．:：\)）]\s*(.+?)\s*$', raw)
+        if m:
+            return m.group(1).upper(), m.group(2).strip()
+        return None, raw
+
+    def _match_option(self, content: str, options: Dict) -> Optional[str]:
+        """在 OCR 选项里找与答案内容最匹配的选项字母。"""
+        content_norm = self._normalize_text(content)
+        if not content_norm:
+            return None
+        best_label = None
+        best_score = 0.0
+        for label, opt in options.items():
+            opt_norm = self._normalize_text(str(opt))
+            if not opt_norm:
+                continue
+            if content_norm in opt_norm or opt_norm in content_norm:
+                score = 1.0
+            else:
+                score = difflib.SequenceMatcher(None, content_norm, opt_norm).ratio()
+            if score > best_score:
+                best_score = score
+                best_label = label
+        if best_label is not None and best_score >= 0.7:
+            return best_label
+        return None
+
+    @staticmethod
+    def _normalize_text(text: str) -> str:
+        """去除空白与常见标点并转小写，提升对 OCR 噪声的容错。"""
+        text = re.sub(r'\s+', '', text)
+        text = re.sub(r'[，。、；：！？,.!?;:()（）\[\]【】《》〈〉·—\-~～]', '', text)
+        return text.lower()
+
     def _check_local(self, question_text: str) -> Optional[Dict]:
-        """在本地知识库中查找匹配"""
+        """在本地知识库中查找匹配（取命中关键词最多的条目，减少误判）"""
         if not self.local_knowledge:
             return None
 
+        def _normalize(text: str) -> str:
+            # 去除空白与常见标点并转小写，提升对 OCR 识别噪声的容错
+            text = re.sub(r'\s+', '', text)
+            text = re.sub(r'[，。、；：！？,.!?]', '', text)
+            return text.lower()
+
+        question_norm = _normalize(question_text)
+
+        best_item_key = None
+        best_item_data = None
+        best_score = (0, 0)  # (命中关键词数量, 命中关键词的最大长度)
+
         for item_key, item_data in self.local_knowledge.items():
             keys = item_data.get('keys', [])
-            matched_count = sum(1 for key in keys if key in question_text)
-            if matched_count >= 1:
-                logger.debug(f"本地库匹配: {item_key} ({matched_count}/{len(keys)} 关键词)")
-                return {
-                    "answer": item_data.get('answer', '?'),
-                    "detail": item_data.get('detail', '')
-                }
-        return None
+            if not keys:
+                continue
+            matched = [k for k in keys if _normalize(k) in question_norm]
+            if not matched:
+                continue
+            score = (len(matched), max(len(_normalize(k)) for k in matched))
+            if score > best_score:
+                best_score = score
+                best_item_key = item_key
+                best_item_data = item_data
+
+        if best_item_data is None:
+            return None
+
+        logger.debug(
+            f"本地库匹配: {best_item_key} "
+            f"(命中 {best_score[0]} 个关键词, 最长关键词 {best_score[1]} 字)"
+        )
+        return {
+            "answer": best_item_data.get('answer', '?'),
+            "detail": best_item_data.get('detail', '')
+        }
 
     def _call_api_with_retry(
         self, question: str, options: Dict, question_type: str, raw_text: str
