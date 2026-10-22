@@ -1,3 +1,12 @@
+> **这条仓库已经停更了。**
+>
+> 这里是最早的 Python 原型，现在维护的是 Android 版：
+> **[Wangxiaolu0716/quiz-assistant-Expansion](https://github.com/Wangxiaolu0716/quiz-assistant-Expansion)**
+>
+> 最新安装包：[网盘](https://share.feijipan.com/s/xbxbXQzH)（提取码 `1006`）· [Releases](https://github.com/Wangxiaolu0716/quiz-assistant-Expansion/releases)
+
+---
+
 # 🧠 AutoAnswer 智答助手 — AI 智能屏幕答题工具
 
 ![Python](https://img.shields.io/badge/Python-3.8%2B-blue?logo=python&logoColor=white)
